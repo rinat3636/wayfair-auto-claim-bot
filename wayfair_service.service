@@ -1,0 +1,18 @@
+[Unit]
+Description=Wayfair Service Pro Auto-Claim Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/wayfair-auto-claim-bot
+EnvironmentFile=/home/ubuntu/wayfair-auto-claim-bot/.env
+ExecStart=/usr/bin/python3 -m wayfair.wayfair_bot
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
