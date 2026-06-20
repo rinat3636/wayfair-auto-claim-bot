@@ -29,14 +29,22 @@ logger = logging.getLogger("wayfair.bot")
 
 
 def _extract_job_id(job: dict[str, Any]) -> Optional[int]:
-    """Extract proJobRoundId from a job dict, handling nested structures."""
-    for key in ("proJobRoundId", "id", "jobId", "pro_job_round_id"):
+    """
+    Extract proJobRoundId from a job edge dict.
+
+    Expected structure from API:
+      {"id": 12345, "jobRound": {"id": ..., "desiredServiceDate": ...}, "status": "..."}
+    The top-level "id" in an edge IS the proJobRoundId.
+    """
+    # Direct field (edge-level id = proJobRoundId)
+    for key in ("id", "proJobRoundId", "jobId", "pro_job_round_id"):
         val = job.get(key)
         if val is not None:
             try:
                 return int(val)
             except (ValueError, TypeError):
                 continue
+    # Nested node structure
     node = job.get("node")
     if isinstance(node, dict):
         return _extract_job_id(node)
@@ -44,11 +52,24 @@ def _extract_job_id(job: dict[str, Any]) -> Optional[int]:
 
 
 def _extract_job_date(job: dict[str, Any]) -> Optional[str]:
-    """Extract a date string (YYYY-MM-DD) from the job."""
-    for key in ("date", "startDate", "scheduledDate", "serviceDate", "start_date"):
+    """
+    Extract a date string (YYYY-MM-DD) from the job.
+
+    Expected: jobRound.desiredServiceDate
+    """
+    # Check jobRound.desiredServiceDate first (primary source)
+    job_round = job.get("jobRound")
+    if isinstance(job_round, dict):
+        ds = job_round.get("desiredServiceDate")
+        if isinstance(ds, str) and len(ds) >= 10:
+            return ds[:10]
+
+    # Direct fields fallback
+    for key in ("desiredServiceDate", "date", "startDate", "scheduledDate", "serviceDate"):
         val = job.get(key)
         if isinstance(val, str) and len(val) >= 10:
             return val[:10]
+
     node = job.get("node")
     if isinstance(node, dict):
         return _extract_job_date(node)

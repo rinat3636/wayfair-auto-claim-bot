@@ -110,11 +110,16 @@ class WayfairAPI:
     # ── Authentication ────────────────────────────────────────────────────
 
     def _extract_token(self, data: dict[str, Any]) -> Optional[str]:
-        """Find a token in auth response, trying common key names."""
-        for key in ("token", "access_token", "authToken", "jwt"):
-            val = data.get(key)
-            if isinstance(val, str) and len(val) > 20:
-                return val
+        """Find a token in auth response (exact field: authenticationTokenString)."""
+        # Exact field name from APK analysis
+        token = data.get("authenticationTokenString")
+        if isinstance(token, str) and len(token) > 20:
+            return token
+        # Alternate field name (snake_case variant)
+        token = data.get("authentication_token_string")
+        if isinstance(token, str) and len(token) > 20:
+            return token
+        # Fallback: generic search
         for key, val in data.items():
             if "token" in key.lower() and isinstance(val, str) and len(val) > 20:
                 return val
@@ -228,7 +233,13 @@ class WayfairAPI:
         operation_name: str,
         variables: dict[str, Any],
     ) -> Optional[dict[str, Any]]:
-        """Execute a persisted GraphQL query/mutation."""
+        """
+        Execute a persisted GraphQL query/mutation.
+
+        Matches EXACT format the Android app uses:
+          POST /wayhome/graphql?queryHash=<hash>
+          Body: {"name": "...", "hash": "...", "variables": "<json-string>"}
+        """
         await self.ensure_authenticated()
         client = self._get_client()
         query_hash = GQL_HASHES.get(operation_name)
@@ -236,19 +247,17 @@ class WayfairAPI:
             logger.error("Unknown operation: %s", operation_name)
             return None
 
+        # Body format: variables is a JSON STRING (not nested object)
         body: dict[str, Any] = {
-            "operationName": operation_name,
-            "variables": variables,
-            "extensions": {
-                "persistedQuery": {
-                    "version": 1,
-                    "sha256Hash": query_hash,
-                },
-            },
+            "name": operation_name,
+            "hash": query_hash,
+            "variables": json.dumps(variables),
         }
+        # Hash also goes as URL query parameter
+        url = f"{WAYFAIR_GRAPHQL_PATH}?queryHash={query_hash}"
         try:
             resp = await client.post(
-                WAYFAIR_GRAPHQL_PATH,
+                url,
                 json=body,
                 headers=self._auth_headers(),
             )
@@ -256,7 +265,7 @@ class WayfairAPI:
                 logger.warning("Token rejected (401) — refreshing…")
                 if await self.refresh_token():
                     resp = await client.post(
-                        WAYFAIR_GRAPHQL_PATH,
+                        url,
                         json=body,
                         headers=self._auth_headers(),
                     )
@@ -305,15 +314,28 @@ class WayfairAPI:
             return []
         data = result.get("data", {})
         jobs: list[dict[str, Any]] = []
-        for key, val in data.items():
-            if isinstance(val, list):
-                jobs.extend(val)
-            elif isinstance(val, dict):
-                nested = val.get("jobs") or val.get("edges") or val.get("nodes")
-                if isinstance(nested, list):
-                    jobs.extend(nested)
-                elif val.get("proJobRoundId") or val.get("id"):
-                    jobs.append(val)
+
+        # Expected structure: data.pro.proJobRoundConnection.edges[]
+        pro = data.get("pro")
+        if isinstance(pro, dict):
+            conn = pro.get("proJobRoundConnection")
+            if isinstance(conn, dict):
+                edges = conn.get("edges", [])
+                if isinstance(edges, list):
+                    jobs.extend(edges)
+
+        # Fallback: try other common structures
+        if not jobs:
+            for key, val in data.items():
+                if isinstance(val, list):
+                    jobs.extend(val)
+                elif isinstance(val, dict):
+                    nested = val.get("jobs") or val.get("edges") or val.get("nodes")
+                    if isinstance(nested, list):
+                        jobs.extend(nested)
+                    elif val.get("proJobRoundId") or val.get("id"):
+                        jobs.append(val)
+
         if not jobs and data:
             logger.debug("get_available_jobs raw data keys: %s", list(data.keys()))
         return jobs

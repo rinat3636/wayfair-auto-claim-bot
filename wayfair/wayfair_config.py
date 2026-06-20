@@ -85,11 +85,8 @@ CLAIM_RETRY_LIMIT: int = int(os.getenv("CLAIM_RETRY_LIMIT", "3"))
 REQUEST_TIMEOUT: int = int(os.getenv("REQUEST_TIMEOUT", "15"))
 
 # ── Headers (mimic Android app) ──────────────────────────────────────────────
-USER_AGENT: str = (
-    "WayfairServicePro/1.100.0 (Android; Build/1960400)"
-)
+USER_AGENT: str = "WayhomeApp/1.100.0 (Android; Build/1960400)"
 X_GRAPH_TYPE_WAYHOME: str = "3"
-X_GRAPH_TYPE_WAYFAIR: str = "1"
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_FILE: str = os.getenv("LOG_FILE", "wayfair_bot.log")
