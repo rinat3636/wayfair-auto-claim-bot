@@ -17,7 +17,6 @@ from typing import Any, Optional
 import httpx
 
 from wayfair.wayfair_config import (
-    CLAIM_RETRY_LIMIT,
     GQL_HASHES,
     REQUEST_TIMEOUT,
     TOKEN_REFRESH_MARGIN_SECONDS,
@@ -330,47 +329,33 @@ class WayfairAPI:
 
     async def claim_job(self, pro_job_round_id: int, date: str) -> dict[str, Any]:
         """
-        Attempt to claim a job.
+        Attempt to claim a job — single shot, no retries, maximum speed.
 
         Returns a dict with keys:
             success (bool), message (str), data (optional dict)
         """
-        for attempt in range(1, CLAIM_RETRY_LIMIT + 1):
-            result = await self._gql_request(
-                "JobClaimMutationV2",
-                {"proJobRoundId": pro_job_round_id, "date": date},
+        result = await self._gql_request(
+            "JobClaimMutationV2",
+            {"proJobRoundId": pro_job_round_id, "date": date},
+        )
+        if result is None:
+            return {"success": False, "message": "No response from server"}
+
+        errors = result.get("errors")
+        if errors:
+            error_msg = errors[0].get("message", str(errors[0])) if errors else "unknown"
+            already_claimed = any(
+                "already" in str(e).lower() or "claimed" in str(e).lower() for e in errors
             )
-            if result is None:
-                if attempt < CLAIM_RETRY_LIMIT:
-                    await asyncio.sleep(0.5)
-                    continue
-                return {"success": False, "message": "No response from server"}
+            if already_claimed:
+                return {"success": False, "message": f"Already claimed: {error_msg}"}
+            return {"success": False, "message": error_msg}
 
-            errors = result.get("errors")
-            if errors:
-                error_msg = errors[0].get("message", str(errors[0])) if errors else "unknown"
-                already_claimed = any(
-                    "already" in str(e).lower() or "claimed" in str(e).lower() for e in errors
-                )
-                if already_claimed:
-                    return {
-                        "success": False,
-                        "message": f"Job already claimed: {error_msg}",
-                    }
-                logger.warning(
-                    "Claim attempt %d/%d error: %s", attempt, CLAIM_RETRY_LIMIT, error_msg
-                )
-                if attempt < CLAIM_RETRY_LIMIT:
-                    await asyncio.sleep(0.5)
-                    continue
-                return {"success": False, "message": error_msg}
-
-            return {
-                "success": True,
-                "message": "Job claimed successfully",
-                "data": result.get("data"),
-            }
-        return {"success": False, "message": "Claim failed after retries"}
+        return {
+            "success": True,
+            "message": "Job claimed successfully",
+            "data": result.get("data"),
+        }
 
     async def get_scheduled_jobs(self, from_date: Optional[str] = None) -> list[dict[str, Any]]:
         """Fetch scheduled (already claimed) jobs."""

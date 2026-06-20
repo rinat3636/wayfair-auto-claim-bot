@@ -78,7 +78,7 @@ GQL_HASHES: dict[str, str] = load_gql_hashes()
 TOKEN_REFRESH_MARGIN_SECONDS: int = int(os.getenv("TOKEN_REFRESH_MARGIN", "300"))
 
 # ── Polling ────────────────────────────────────────────────────────────────────
-POLL_INTERVAL_SECONDS: float = float(os.getenv("POLL_INTERVAL_SECONDS", "2"))
+POLL_INTERVAL_SECONDS: float = float(os.getenv("POLL_INTERVAL_SECONDS", "1"))
 CLAIM_RETRY_LIMIT: int = int(os.getenv("CLAIM_RETRY_LIMIT", "3"))
 
 # ── HTTP Defaults ─────────────────────────────────────────────────────────────

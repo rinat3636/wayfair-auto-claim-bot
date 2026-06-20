@@ -1,7 +1,12 @@
 """
 wayfair_bot.py — Auto-claim bot for Wayfair Service Pro.
 
-Continuously polls for new available jobs and instantly claims them.
+Logic:
+  1. Poll for available jobs every N seconds
+  2. New job detected → IMMEDIATELY send claim (no delay)
+  3. Multiple new jobs → claim ALL in parallel (asyncio.gather)
+  4. Already claimed by someone else → skip forever
+  5. Transient error → retry on next poll cycle only
 """
 
 import asyncio
@@ -51,31 +56,37 @@ def _extract_job_date(job: dict[str, Any]) -> Optional[str]:
 
 
 class WayfairAutoClaimBot:
-    """Monitors available jobs and auto-claims them."""
+    """
+    Monitors available jobs and INSTANTLY claims them.
+
+    Flow:
+        poll → detect new jobs → fire parallel claims → log results
+    """
 
     def __init__(self, email: str, password: str) -> None:
         self.api = WayfairAPI(email, password)
-        self.seen_jobs: set[int] = set()
         self.claimed_jobs: set[int] = set()
+        self.failed_jobs: set[int] = set()
         self.running = False
         self._stats = {
             "polls": 0,
-            "jobs_seen": 0,
+            "new_jobs_detected": 0,
             "claims_attempted": 0,
             "claims_success": 0,
-            "claims_failed": 0,
-            "errors": 0,
+            "claims_already_taken": 0,
+            "claims_error": 0,
         }
 
     async def start(self) -> None:
         """Start the auto-claim loop."""
         logger.info("=" * 60)
-        logger.info("Wayfair Service Pro Auto-Claim Bot starting…")
+        logger.info("Wayfair Service Pro Auto-Claim Bot")
+        logger.info("Strategy: detect → INSTANT parallel claim")
         logger.info("Poll interval: %.1f s", POLL_INTERVAL_SECONDS)
         logger.info("=" * 60)
 
         if not await self.api.authenticate():
-            logger.critical("Initial authentication failed — exiting")
+            logger.critical("Authentication failed — exiting")
             return
 
         self.running = True
@@ -92,85 +103,102 @@ class WayfairAutoClaimBot:
     async def _poll_loop(self) -> None:
         while self.running:
             try:
-                await self._poll_once()
+                await self._poll_and_claim()
             except Exception:
-                self._stats["errors"] += 1
-                logger.exception("Unhandled error during poll")
+                self._stats["claims_error"] += 1
+                logger.exception("Unhandled error during poll cycle")
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
-    async def _poll_once(self) -> None:
+    async def _poll_and_claim(self) -> None:
+        """Single poll cycle: get jobs → instantly claim all new ones in parallel."""
         self._stats["polls"] += 1
-        ts_start = datetime.now(timezone.utc)
+        detected_at = datetime.now(timezone.utc)
 
         jobs = await self.api.get_available_jobs()
         if not jobs:
             return
 
+        # Filter: only jobs we haven't already claimed or permanently failed
+        new_jobs: list[tuple[int, str]] = []
         for job in jobs:
             job_id = _extract_job_id(job)
             if job_id is None:
-                logger.debug("Skipping job without parseable ID: %s", job)
                 continue
-
-            if job_id in self.claimed_jobs:
+            if job_id in self.claimed_jobs or job_id in self.failed_jobs:
                 continue
+            job_date = _extract_job_date(job) or detected_at.strftime("%Y-%m-%d")
+            new_jobs.append((job_id, job_date))
 
-            self._stats["jobs_seen"] += 1
-            job_date = _extract_job_date(job)
+        if not new_jobs:
+            return
 
-            if job_id not in self.seen_jobs:
-                self.seen_jobs.add(job_id)
-                logger.info(
-                    "NEW JOB  id=%d  date=%s  appeared=%s",
-                    job_id,
-                    job_date,
-                    ts_start.isoformat(),
-                )
+        self._stats["new_jobs_detected"] += len(new_jobs)
+        logger.info(
+            "DETECTED %d new job(s) at %s — claiming NOW",
+            len(new_jobs),
+            detected_at.isoformat(),
+        )
 
-            await self._try_claim(job_id, job_date, ts_start)
+        # Fire ALL claims in parallel — speed is critical
+        tasks = [
+            self._claim_one(job_id, job_date, detected_at)
+            for job_id, job_date in new_jobs
+        ]
+        await asyncio.gather(*tasks)
 
-    async def _try_claim(
+    async def _claim_one(
         self,
         job_id: int,
-        date: Optional[str],
-        appeared_at: datetime,
+        date: str,
+        detected_at: datetime,
     ) -> None:
-        if date is None:
-            date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
+        """Claim a single job as fast as possible."""
         self._stats["claims_attempted"] += 1
-        claim_ts = datetime.now(timezone.utc)
-        logger.info("CLAIM ATTEMPT  id=%d  date=%s  ts=%s", job_id, date, claim_ts.isoformat())
 
+        # CLAIM FIRST — no delays, no extra logging before the request
         result = await self.api.claim_job(job_id, date)
-        elapsed_ms = (datetime.now(timezone.utc) - appeared_at).total_seconds() * 1000
+
+        # Measure reaction time
+        claimed_at = datetime.now(timezone.utc)
+        reaction_ms = (claimed_at - detected_at).total_seconds() * 1000
 
         if result["success"]:
             self._stats["claims_success"] += 1
             self.claimed_jobs.add(job_id)
             logger.info(
-                "CLAIM SUCCESS  id=%d  reaction=%.0f ms  msg=%s",
+                "✓ CLAIMED  id=%d  date=%s  reaction=%d ms",
                 job_id,
-                elapsed_ms,
-                result["message"],
+                date,
+                int(reaction_ms),
             )
         else:
-            self._stats["claims_failed"] += 1
-            logger.warning(
-                "CLAIM FAILED   id=%d  reaction=%.0f ms  msg=%s",
-                job_id,
-                elapsed_ms,
-                result["message"],
-            )
-            if "already" in result["message"].lower():
-                self.claimed_jobs.add(job_id)
+            msg = result["message"]
+            already_taken = "already" in msg.lower() or "claimed" in msg.lower()
+
+            if already_taken:
+                self._stats["claims_already_taken"] += 1
+                self.failed_jobs.add(job_id)
+                logger.warning(
+                    "✗ TAKEN    id=%d  date=%s  reaction=%d ms  (someone was faster)",
+                    job_id,
+                    date,
+                    int(reaction_ms),
+                )
+            else:
+                self._stats["claims_error"] += 1
+                # Transient error — don't add to failed_jobs, will retry next cycle
+                logger.error(
+                    "✗ ERROR    id=%d  date=%s  reaction=%d ms  msg=%s",
+                    job_id,
+                    date,
+                    int(reaction_ms),
+                    msg,
+                )
 
     def _log_stats(self) -> None:
         logger.info("─── Session Statistics ───")
         for k, v in self._stats.items():
             logger.info("  %s: %s", k, v)
-        logger.info("  unique_jobs_seen: %d", len(self.seen_jobs))
-        logger.info("  jobs_claimed: %d", len(self.claimed_jobs))
 
 
 def setup_logging() -> None:
